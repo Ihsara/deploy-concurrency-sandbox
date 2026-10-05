@@ -1,0 +1,27 @@
+name: Deployment Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+
+jobs:
+  deploy-dev:
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: dev
+
+  deploy-test:
+    needs: deploy-dev
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: test
+
+  deploy-prod:
+    needs: deploy-test
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: prod

@@ -1,0 +1,91 @@
+name: Deploy to environment (reusable)
+
+# Stand-in for a shared dbt deploy workflow. No warehouse: the "warehouse" is the
+# branch live/<env>, overwritten on every deploy (last writer wins, like CREATE OR
+# REPLACE). The state branch env-state/<env> is merged from the run's commit and
+# pushed, as the real workflow does.
+#
+# Repository variable FIX switches the safeguards:
+#   off -> current behaviour: no concurrency, no staleness check, no push retry
+#   on  -> per-environment concurrency, refuse-if-outdated, push retry
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: ${{ vars.FIX == 'on' && format('deploy-{0}', inputs.environment) || format('free-{0}-{1}', inputs.environment, github.run_id) }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      ENV: ${{ inputs.environment }}
+      FIX: ${{ vars.FIX }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify
+        run: |
+          git config user.name "sandbox-bot"
+          git config user.email "sandbox-bot@users.noreply.github.com"
+          echo "run=${{ github.run_id }} sha=${GITHUB_SHA::7} env=$ENV fix=$FIX"
+          echo "model: $(cat models/orders.sql)"
+
+      - name: Refuse if a newer commit is already deployed
+        if: env.FIX == 'on'
+        run: |
+          if git fetch origin "live/$ENV" 2>/dev/null; then
+            DEPLOYED=$(git show "origin/live/$ENV:deployed_sha.txt")
+            if [ "$DEPLOYED" != "$GITHUB_SHA" ] && git merge-base --is-ancestor "$GITHUB_SHA" "$DEPLOYED"; then
+              echo "::error::OUTDATED: ${GITHUB_SHA::7} is older than deployed ${DEPLOYED::7}; refusing"
+              exit 1
+            fi
+          fi
+          echo "not outdated"
+
+      - name: Deploy (overwrite live/<env>, slow on purpose)
+        run: |
+          sleep 45
+          WORK=$(mktemp -d)
+          cp models/orders.sql "$WORK/"
+          echo "$GITHUB_SHA" > "$WORK/deployed_sha.txt"
+          echo "run ${{ github.run_id }}" > "$WORK/deployed_by.txt"
+          git checkout --orphan "tmp-live" -q
+          git rm -rfq .
+          cp "$WORK"/* .
+          git add -A
+          git commit -qm "deploy ${GITHUB_SHA::7} to $ENV"
+          git push -f origin "HEAD:live/$ENV"
+          git checkout -q "$GITHUB_SHA"
+          echo "deployed ${GITHUB_SHA::7} -> live/$ENV"
+
+      - name: Update env-state/<env>
+        run: |
+          attempts=1
+          [ "$FIX" = "on" ] && attempts=4
+          for i in $(seq 1 $attempts); do
+            git fetch origin "env-state/$ENV" 2>/dev/null \
+              && git checkout -q -B state "origin/env-state/$ENV" \
+              || git checkout -q --orphan state
+            git merge "$GITHUB_SHA" --no-edit -X theirs --allow-unrelated-histories -q
+            echo "$GITHUB_SHA" > manifest_sha.txt
+            git add manifest_sha.txt
+            git commit -qm "state ${GITHUB_SHA::7} [skip ci]" --allow-empty
+            if git push origin "state:env-state/$ENV"; then
+              echo "state pushed on attempt $i"; exit 0
+            fi
+            echo "push rejected on attempt $i"
+            git checkout -q "$GITHUB_SHA"
+            sleep 5
+          done
+          echo "::error::env-state push failed after $attempts attempt(s)"
+          exit 1
