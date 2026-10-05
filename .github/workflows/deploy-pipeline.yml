@@ -8,6 +8,9 @@ on:
     paths-ignore:
       - 'README.md'
 
+permissions:
+  contents: write
+
 jobs:
   deploy-dev:
     uses: ./.github/workflows/deploy-env.yml
