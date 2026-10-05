@@ -1,1 +1,1 @@
-select 'v5' as version
+select 'v6' as version
